@@ -16,16 +16,18 @@ import {
 import * as stylex from '@stylexjs/stylex';
 import { ClipboardCheckIcon, Plus } from 'lucide-react';
 import type { ReactNode } from 'react';
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { memo, useCallback, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import type { Components } from 'react-virtuoso';
 import { Virtuoso } from 'react-virtuoso';
 
 import AsyncBoundary from '@/components/AsyncBoundary';
+import { useLoadedProjectList } from '@/store/project';
 import { useTaskStore } from '@/store/task';
 import { taskListSelectors } from '@/store/task/selectors';
 import { COMPLETE_TASK_LIST_MAX_ITEMS } from '@/store/task/slices/list/action';
 import type { TaskListItem } from '@/store/task/slices/list/initialState';
+import { useInterfaceDensity } from '@/styles/density';
 
 import { createTaskModal } from '../CreateTaskModal';
 import type { TaskItemRouteScope } from '../features/AgentTaskItem';
@@ -45,17 +47,17 @@ import {
   normalizeTaskGroupBy,
 } from './listViewOptions';
 import SelectableTaskRow, { selectableTaskItemClassName } from './selection/SelectableTaskRow';
-import { useTaskSelectionStore } from './selection/store';
 import TaskBulkActionBar from './selection/TaskBulkActionBar';
-import { isEditableTarget } from './selection/taskSelectionModel';
-import { useTaskBatchUndo } from './selection/undo/useTaskBatchUndo';
-import { useSelectionScope } from './selection/useSelectionScope';
+import { useTaskListSelection } from './selection/useTaskListSelection';
 import TaskGroupLabel from './TaskGroupLabel';
 import TaskItemSkeleton from './TaskItemSkeleton';
 import type { TaskListGroupEntry, TaskListVirtualItem } from './taskListVirtualModel';
 import { flattenTaskListEntries } from './taskListVirtualModel';
 import TaskRowIndent from './TaskRowIndent';
 import { useClosestScrollParent } from './useClosestScrollParent';
+
+/** Space above a non-first top-level group header; Compact stacks them like Linear. */
+const GROUP_GAP = { compact: 4, loose: 16 } as const;
 
 /** Scope inherited by tasks created from a group header. */
 export interface TaskListCreateScope {
@@ -86,6 +88,8 @@ interface TaskListProps {
    * edited out of it (priority changed, assignee swapped) leaves at once.
    */
   filter?: TaskListFilter;
+  /** The list already belongs to one project, so its rows do not repeat it. */
+  hideProject?: boolean;
   /** First-load / retry in flight (SWR `isLoading`). */
   isLoading?: boolean;
   /** Optional list source for alternate task collections such as scheduled tasks. */
@@ -158,6 +162,7 @@ const TaskGroupHeader = memo<{
   onToggle: (key: string) => void;
 }>(({ createScope, item, onToggle }) => {
   const { t } = useTranslation('chat');
+  const density = useInterfaceDensity();
   const sub = item.kind === 'subGroup';
   const createDefaults = !createScope
     ? undefined
@@ -170,7 +175,7 @@ const TaskGroupHeader = memo<{
   }, [createDefaults, createScope]);
 
   return (
-    <div style={{ paddingTop: item.first ? 0 : sub ? 6 : 16 }}>
+    <div style={{ paddingTop: item.first ? 0 : sub ? 6 : GROUP_GAP[density] }}>
       <div {...stylex.props(styles.header)}>
         <AccordionRoot
           indicatorPlacement={'start'}
@@ -222,6 +227,7 @@ const TaskList = memo<TaskListProps>((props) => {
     data,
     error,
     filter,
+    hideProject,
     isLoading,
     items,
     onRetry,
@@ -267,6 +273,8 @@ const TaskList = memo<TaskListProps>((props) => {
   // resolve into a context row.
   const taskById = useMemo(() => new Map(tasks.map((task) => [task.id, task])), [tasks]);
   const nested = options.showSubTasks && options.nestedSubTasks;
+  // Project groups read their names from this list (`getTaskProjectGroupMeta`).
+  const projects = useLoadedProjectList();
   const groupedTaskEntries = useMemo((): TaskListGroupEntry[] => {
     const compare = (a: (typeof visibleTasks)[number], b: (typeof visibleTasks)[number]) =>
       compareTaskItems(a, b, options);
@@ -298,7 +306,8 @@ const TaskList = memo<TaskListProps>((props) => {
         ),
       };
     });
-  }, [effectiveSubGroupBy, groupBy, nested, options, taskById, visibleTasks]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- a project list change renames or folds project groups
+  }, [effectiveSubGroupBy, groupBy, nested, options, projects, taskById, visibleTasks]);
 
   // Collapse state lives here (not in the Accordion) because headers and rows
   // are flattened into one virtual list; a collapsed key simply drops its rows
@@ -327,63 +336,11 @@ const TaskList = memo<TaskListProps>((props) => {
     return [...ids];
   }, [groupedTaskEntries]);
   const listRef = useRef<HTMLDivElement>(null);
-  const selectableIdsRef = useRef(selectableIds);
-  selectableIdsRef.current = selectableIds;
-  const getSelectionOrder = useCallback(() => selectableIdsRef.current, []);
-
-  // A selection never outlives the rows it names: prune on every list change,
-  // and drop it when this list (or its collection) goes away.
-  useEffect(() => {
-    useTaskSelectionStore.getState().prune(new Set(selectableIds));
-  }, [selectableIds]);
-  const selectionScope = props.selectionScope ?? (items ? 'items' : (queryKey ?? ''));
-  useSelectionScope(selectionScope);
-  const { undoLast } = useTaskBatchUndo();
-  const undoLastRef = useRef(undoLast);
-  useEffect(() => {
-    undoLastRef.current = undoLast;
-  }, [undoLast]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || isEditableTarget(event.target)) return;
-      // Only when nothing else holds focus, or focus is on the list itself:
-      // ⌘A over a side panel's text keeps selecting that text, and Esc inside
-      // a drawer or popover stays theirs.
-      const target = event.target as Node | null;
-      const onList = !!target && !!listRef.current?.contains(target);
-      if (target !== document.body && !onList) return;
-      const selection = useTaskSelectionStore.getState();
-      if (
-        event.key.toLowerCase() === 'a' &&
-        (event.metaKey || event.ctrlKey) &&
-        !event.shiftKey &&
-        !event.altKey
-      ) {
-        if (selectableIdsRef.current.length === 0) return;
-        event.preventDefault();
-        selection.selectAll(selectableIdsRef.current);
-        return;
-      }
-      // ⌘/Ctrl+Z: undo the most recent batch action (session-wide stack, so it
-      // still works after its toast is gone). Shift+⌘Z is left to the page.
-      if (
-        event.key.toLowerCase() === 'z' &&
-        (event.metaKey || event.ctrlKey) &&
-        !event.shiftKey &&
-        !event.altKey
-      ) {
-        if (undoLastRef.current()) event.preventDefault();
-        return;
-      }
-      if (event.key === 'Escape' && selection.selectedIds.length > 0 && !selection.progress) {
-        event.preventDefault();
-        selection.clear();
-      }
-    };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, []);
+  const { getSelectionOrder } = useTaskListSelection({
+    listRef,
+    scope: props.selectionScope ?? (items ? 'items' : (queryKey ?? '')),
+    selectableIds,
+  });
 
   const virtualItems = useMemo(
     () =>
@@ -408,7 +365,11 @@ const TaskList = memo<TaskListProps>((props) => {
         <div style={{ paddingBlock: 1, paddingInline: 2 }}>
           <TaskRowIndent depth={item.row.depth} muted={item.row.isParentContext}>
             {item.row.isParentContext ? (
-              <AgentTaskItem routeScope={routeScope} task={item.row.task} />
+              <AgentTaskItem
+                hideProject={hideProject}
+                routeScope={routeScope}
+                task={item.row.task}
+              />
             ) : (
               <SelectableTaskRow
                 id={item.row.task.id}
@@ -419,6 +380,7 @@ const TaskList = memo<TaskListProps>((props) => {
               >
                 <AgentTaskItem
                   className={selectableTaskItemClassName}
+                  hideProject={hideProject}
                   routeScope={routeScope}
                   task={item.row.task}
                 />
@@ -429,7 +391,7 @@ const TaskList = memo<TaskListProps>((props) => {
         </div>
       );
     },
-    [createScope, getSelectionOrder, routeScope, toggleCollapsed],
+    [createScope, getSelectionOrder, hideProject, routeScope, toggleCollapsed],
   );
 
   const skeleton = (

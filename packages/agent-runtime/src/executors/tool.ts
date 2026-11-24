@@ -21,6 +21,7 @@ import {
 } from '../utils';
 import { selectEffectiveToolManifestMap, selectToolSourceMap } from '../utils/operationToolSet';
 import { settleAbortedToolRows } from './abortedToolRows';
+import { resetUnresolvedToolFeedback } from './resolveTools';
 import {
   createToolMessage,
   isBlockedBeforeExecution,
@@ -438,6 +439,7 @@ const persistActivatedTools = ({
       })
       .map((tool) => ({
         activatedAtStep: stepCount,
+        afterToolCallId: result.toolCallId,
         id: tool.identifier,
         manifest: effectiveManifestMap[tool.identifier],
         source: 'discovery' as const,
@@ -451,7 +453,8 @@ const persistActivatedTools = ({
 
 export const callTool =
   (host: AgentRuntimeHost): InstructionExecutor =>
-  async (instruction, state, runtimeContext) => {
+  async (instruction, entryState, runtimeContext) => {
+    const state = resetUnresolvedToolFeedback(entryState);
     const { payload } = instruction as Extract<AgentInstruction, { type: 'call_tool' }>;
     const tools = requireToolTransport(host);
     const tool = payload.toolCalling;
@@ -568,6 +571,7 @@ export const callTool =
         if (!execution.resultPersisted) {
           await updateExistingToolMessage({
             host,
+            ownedByTransport: true,
             result: executionResult,
             toolMessageId,
             resultBlocked: execution.resultBlocked,
@@ -753,7 +757,8 @@ export const callTool =
 
 export const callToolsBatch =
   (host: AgentRuntimeHost): InstructionExecutor =>
-  async (instruction, state, runtimeContext) => {
+  async (instruction, entryState, runtimeContext) => {
+    const state = resetUnresolvedToolFeedback(entryState);
     const { payload } = instruction as Extract<AgentInstruction, { type: 'call_tools_batch' }>;
     const parentMessageId = payload.parentMessageId as string;
     const toolsCalling = payload.toolsCalling as ChatToolPayload[];
@@ -924,6 +929,7 @@ export const callToolsBatch =
           if (!execution.resultPersisted) {
             await updateExistingToolMessage({
               host,
+              ownedByTransport: true,
               result: executionResult,
               toolMessageId,
               resultBlocked: execution.resultBlocked,

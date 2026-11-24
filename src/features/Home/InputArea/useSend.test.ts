@@ -71,9 +71,11 @@ const agentState = vi.hoisted(() => ({
   internal_dispatchAgentMap: vi.fn(),
 }));
 
+const CACHE_SCOPE = vi.hoisted(() => 'user-1:personal');
+
 const globalState = vi.hoisted(() => ({
   systemStatus: {
-    homeSelectedAgentId: undefined as string | undefined,
+    homeSelectedAgentIdByScope: {} as Record<string, string>,
   },
   toggleTaskAgentPanel: toggleTaskAgentPanelMock,
   updateSystemStatus: vi.fn(),
@@ -144,8 +146,13 @@ vi.mock('@/store/global', () => ({
 
 vi.mock('@/store/global/selectors', () => ({
   systemStatusSelectors: {
-    homeSelectedAgentId: (state: typeof globalState) => state.systemStatus.homeSelectedAgentId,
+    homeSelectedAgentId: (scope: string) => (state: typeof globalState) =>
+      state.systemStatus.homeSelectedAgentIdByScope[scope],
   },
+}));
+
+vi.mock('@/libs/swr/useCacheScope', () => ({
+  useCacheScope: () => CACHE_SCOPE,
 }));
 
 vi.mock('@/store/chat', () => {
@@ -163,7 +170,8 @@ vi.mock('@/store/file', () => {
     fileChatSelectors: {
       chatContextSelections: (contextKey: string) => (state: typeof fileState) =>
         state.chatContextSelectionsByContext[contextKey] ?? [],
-      chatUploadFileList: (state: typeof fileState) => state.chatUploadFileList,
+      chatUploadFileList: (contextKey: string) => (state: typeof fileState) =>
+        contextKey === 'home' ? state.chatUploadFileList : [],
     },
     useFileStore,
   };
@@ -180,6 +188,13 @@ vi.mock('@/store/task', () => ({
   useTaskStore: (selector: (state: typeof taskState) => unknown) => selector(taskState),
 }));
 
+const weeklyReportSubmission = (): Parameters<SendButtonHandler>[0] => ({
+  clearContent: vi.fn(),
+  editor: {} as Parameters<SendButtonHandler>[0]['editor'],
+  getEditorData: () => ({ type: 'doc' }),
+  getMarkdownContent: () => 'Prepare the weekly report',
+});
+
 describe('Home InputArea useSend', () => {
   beforeEach(() => {
     routerMock.push.mockReset();
@@ -187,13 +202,16 @@ describe('Home InputArea useSend', () => {
     sendMessageMock.mockReset();
     clearContentMock.mockReset();
     clearChatUploadFileListMock.mockReset();
-    clearChatUploadFileListMock.mockImplementation((submittedIds?: string[]) => {
-      fileState.chatUploadFileList = submittedIds
-        ? fileState.chatUploadFileList.filter(
-            (file: { id: string }) => !submittedIds.includes(file.id),
-          )
-        : [];
-    });
+    clearChatUploadFileListMock.mockImplementation(
+      (contextKey: string, submittedIds?: string[]) => {
+        if (contextKey !== 'home') return;
+        fileState.chatUploadFileList = submittedIds
+          ? fileState.chatUploadFileList.filter(
+              (file: { id: string }) => !submittedIds.includes(file.id),
+            )
+          : [];
+      },
+    );
     clearChatContextSelectionsMock.mockReset();
     restoreChatContextSelectionsMock.mockReset();
     createTaskMock.mockReset();
@@ -212,7 +230,7 @@ describe('Home InputArea useSend', () => {
     fileState.chatUploadFileList = [];
     homeState.inputActiveMode = null;
     homeState.ungroupedAgents = [];
-    globalState.systemStatus.homeSelectedAgentId = undefined;
+    globalState.systemStatus.homeSelectedAgentIdByScope = {};
     delete agentState.agentMap.agt_custom;
     activeWorkspaceSlugMock.value = null;
     activeWorkspaceIdMock.value = null;
@@ -220,7 +238,7 @@ describe('Home InputArea useSend', () => {
 
   it('creates a private workspace task without starting it', async () => {
     activeWorkspaceIdMock.value = 'workspace-1';
-    globalState.systemStatus.homeSelectedAgentId = 'agt_custom';
+    globalState.systemStatus.homeSelectedAgentIdByScope = { [CACHE_SCOPE]: 'agt_custom' };
     homeState.ungroupedAgents = [{ id: 'agt_custom', type: 'agent' }];
     agentState.agentMap.agt_custom = {};
     createTaskMock.mockResolvedValue({
@@ -229,12 +247,7 @@ describe('Home InputArea useSend', () => {
       identifier: 'T-26',
     });
     const { result } = renderHook(() => useSend('task'));
-    const params: Parameters<SendButtonHandler>[0] = {
-      clearContent: vi.fn(),
-      editor: {} as Parameters<SendButtonHandler>[0]['editor'],
-      getEditorData: () => ({ type: 'doc' }),
-      getMarkdownContent: () => 'Prepare the weekly report',
-    };
+    const params: Parameters<SendButtonHandler>[0] = weeklyReportSubmission();
 
     await act(async () => {
       await result.current.send(params);
@@ -303,12 +316,7 @@ describe('Home InputArea useSend', () => {
     ] as any;
     createTaskMock.mockRejectedValue(new Error('create failed'));
     const { result } = renderHook(() => useSend('task'));
-    const params: Parameters<SendButtonHandler>[0] = {
-      clearContent: vi.fn(),
-      editor: {} as Parameters<SendButtonHandler>[0]['editor'],
-      getEditorData: () => ({ type: 'doc' }),
-      getMarkdownContent: () => 'Prepare the weekly report',
-    };
+    const params: Parameters<SendButtonHandler>[0] = weeklyReportSubmission();
 
     await act(async () => {
       await result.current.send(params);
@@ -333,12 +341,7 @@ describe('Home InputArea useSend', () => {
     ] as any;
     createTaskMock.mockResolvedValue({ identifier: 'T-27' });
     const { result } = renderHook(() => useSend('task'));
-    const params: Parameters<SendButtonHandler>[0] = {
-      clearContent: vi.fn(),
-      editor: {} as Parameters<SendButtonHandler>[0]['editor'],
-      getEditorData: () => ({ type: 'doc' }),
-      getMarkdownContent: () => 'Prepare the weekly report',
-    };
+    const params: Parameters<SendButtonHandler>[0] = weeklyReportSubmission();
 
     await act(async () => {
       await result.current.send(params);
@@ -505,7 +508,7 @@ describe('Home InputArea useSend', () => {
   });
 
   describe('when the server refuses the run after Home navigated away', () => {
-    // ROOT CAUSE (LOBE-15420):
+    // ROOT CAUSE:
     //
     // A Home send navigates to the agent's blank conversation and clears the
     // Home editor without waiting for the run. When the server then refuses the
@@ -595,7 +598,7 @@ describe('Home InputArea useSend', () => {
   });
 
   it('sends chat-mode messages to the Agent selected on Home', async () => {
-    globalState.systemStatus.homeSelectedAgentId = 'agt_custom';
+    globalState.systemStatus.homeSelectedAgentIdByScope = { [CACHE_SCOPE]: 'agt_custom' };
     homeState.ungroupedAgents = [{ id: 'agt_custom', type: 'agent' }];
     agentState.agentMap.agt_custom = {};
 

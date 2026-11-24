@@ -48,6 +48,8 @@ const MAX_IMPORT_ISSUES = 500;
 const stateTypesInput = z.array(z.enum(LINEAR_ISSUE_STATE_TYPES)).min(1);
 
 const issueFilterInput = connectionInput.extend({
+  /** Also list archived issues, which Linear leaves out unless asked. */
+  includeArchived: z.boolean().optional(),
   linearProjectId: z.string().nullish(),
   stateTypes: stateTypesInput,
   teamId: z.string().min(1),
@@ -167,6 +169,8 @@ export const linearRouter = router({
         issueIds: z.array(z.string().min(1)).min(1).max(MAX_IMPORT_ISSUES),
         /** Also copy each issue's Linear comments onto its task. */
         syncComments: z.boolean().optional(),
+        /** Also bring each issue's Linear labels onto its task, creating the missing ones. */
+        syncLabels: z.boolean().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -180,6 +184,7 @@ export const linearRouter = router({
         kind: 'issues',
         projectId: input.projectId,
         syncComments: input.syncComments || undefined,
+        syncLabels: input.syncLabels || undefined,
       });
       return { id };
     }),
@@ -219,10 +224,14 @@ export const linearRouter = router({
 
   createSyncRule: linearTaskWriteProcedure
     .input(
-      issueFilterInput.merge(projectInput).extend({
-        linearProjectName: z.string().max(255).nullish(),
-        teamName: z.string().min(1).max(255),
-      }),
+      // A rule keeps what to match; archived issues are chosen per run, in `startRuleSync`.
+      issueFilterInput
+        .omit({ includeArchived: true })
+        .merge(projectInput)
+        .extend({
+          linearProjectName: z.string().max(255).nullish(),
+          teamName: z.string().min(1).max(255),
+        }),
     )
     .mutation(async ({ ctx, input }) => {
       await requireWritableConnection(ctx, input.connectionId);
@@ -262,9 +271,13 @@ export const linearRouter = router({
   startRuleSync: linearTaskWriteProcedure
     .input(
       z.object({
+        /** Also sync archived issues; a per-run choice, like `syncComments`. */
+        includeArchived: z.boolean().optional(),
         ruleId: z.string().uuid(),
         /** Also copy each issue's Linear comments onto its task. */
         syncComments: z.boolean().optional(),
+        /** Also bring each issue's Linear labels onto its task, creating the missing ones. */
+        syncLabels: z.boolean().optional(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
@@ -283,10 +296,12 @@ export const linearRouter = router({
         ctx.scope.workspaceId ?? undefined,
         {
           connectionId: rule.connectionId,
+          includeArchived: input.includeArchived || undefined,
           kind: 'rule',
           projectId: rule.projectId,
           ruleId: rule.id,
           syncComments: input.syncComments || undefined,
+          syncLabels: input.syncLabels || undefined,
         },
       );
       return { id };

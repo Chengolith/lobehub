@@ -13,14 +13,26 @@ import { useState } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import AsyncError from '@/components/AsyncError';
+import { getDeviceIcon } from '@/features/DeviceManager/getDeviceIcon';
+import { useDeviceSelectOptions } from '@/features/DeviceManager/useDeviceSelectOptions';
 import { deviceService } from '@/services/device';
 import { deviceSelectors, useDeviceStore } from '@/store/device';
 import { useProjectDirectoryStore, useProjectEnvironments } from '@/store/projectWorkingDirectory';
 
+interface AddDirectoryOptions {
+  /** The machine to add it on, when the caller already knows it. */
+  deviceId?: string;
+  /** Called with the folder once it is part of the project. */
+  /** Called with the folder once it is part of the project, and the device it was saved on. */
+  onAdded?: (directory: { deviceId: string; id: string }) => void;
+}
+
 function AddDirectoryContent({
   projectId,
   environmentId: initialEnvironmentId,
-}: {
+  deviceId: initialDeviceId,
+  onAdded,
+}: AddDirectoryOptions & {
   projectId: string;
   environmentId?: string;
 }) {
@@ -29,9 +41,18 @@ function AddDirectoryContent({
   const devices = useDeviceStore(deviceSelectors.deviceList);
   const environmentsRequest = useProjectDirectoryStore((s) => s.useFetchEnvironments)(projectId);
   const environments = useProjectEnvironments(projectId);
-  const [environmentId, setEnvironment] = useState(initialEnvironmentId ?? '');
-  const [deviceId, setDevice] = useState('');
+  // A project has one environment, made with it: nothing to choose.
+  const environmentId = initialEnvironmentId ?? environments[0]?.id ?? '';
+  const [deviceId, setDevice] = useState(initialDeviceId ?? '');
+  // Opened from a device's own row: the machine is decided, only its folder is asked.
+  const fixedDevice = initialDeviceId
+    ? devices.find((device) => device.deviceId === initialDeviceId)
+    : undefined;
+  const fixedDeviceName = initialDeviceId
+    ? fixedDevice?.friendlyName || fixedDevice?.hostname || initialDeviceId
+    : undefined;
   const [path, setPath] = useState('');
+  const deviceOptions = useDeviceSelectOptions(devices, deviceId);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<unknown>();
   const bind = useProjectDirectoryStore((s) => s.bind);
@@ -42,7 +63,7 @@ function AddDirectoryContent({
     try {
       const stat = await deviceService.statPath(deviceId, path);
       if (!stat?.exists || !stat.isDirectory) throw new Error(t('settings.directoryUnavailable'));
-      await bind({
+      const added = await bind({
         projectId,
         environmentId,
         deviceId,
@@ -50,6 +71,8 @@ function AddDirectoryContent({
         name: path.split(/[\\/]/).findLast(Boolean) || path,
       });
       close();
+      // The device picked here, not the one the caller suggested: the person may have changed it.
+      onAdded?.({ deviceId, id: added.id });
     } catch (error) {
       console.error('Failed to add work location', error);
       setError(error);
@@ -59,31 +82,32 @@ function AddDirectoryContent({
   };
   return (
     <Flexbox gap={16}>
-      <Text type="secondary">{t('settings.addDirectoryDescription')}</Text>
-      <Text>{t('directories.environment')}</Text>
-      <Select
-        aria-label={t('directories.environment')}
-        disabled={pending}
-        options={environments.map((env) => ({ value: env.id, label: env.name }))}
-        placeholder={t('directories.environment')}
-        value={environmentId}
-        onChange={(id) => {
-          setEnvironment(id ?? '');
-          setError(undefined);
-        }}
-      />
-      <Text>{t('directories.device')}</Text>
-      <Select
-        aria-label={t('directories.device')}
-        disabled={pending}
-        options={devices.map((d) => ({ value: d.deviceId, label: d.friendlyName || d.deviceId }))}
-        placeholder={t('directories.device')}
-        value={deviceId}
-        onChange={(id) => {
-          setDevice(id ?? '');
-          setError(undefined);
-        }}
-      />
+      <Text type="secondary">
+        {fixedDeviceName
+          ? t('settings.setDirectoryDescription', { device: fixedDeviceName })
+          : t('settings.addDirectoryDescription')}
+      </Text>
+      {fixedDeviceName ? (
+        <Flexbox horizontal align="center" gap={8}>
+          {getDeviceIcon(fixedDevice?.platform, 16)}
+          <Text weight={500}>{fixedDeviceName}</Text>
+        </Flexbox>
+      ) : (
+        <>
+          <Text>{t('directories.device')}</Text>
+          <Select
+            aria-label={t('directories.device')}
+            disabled={pending}
+            options={deviceOptions}
+            placeholder={t('directories.device')}
+            value={deviceId}
+            onChange={(id) => {
+              setDevice(id ?? '');
+              setError(undefined);
+            }}
+          />
+        </>
+      )}
       <Text>{t('directories.path')}</Text>
       <Input
         aria-label={t('directories.path')}
@@ -121,16 +145,24 @@ function AddDirectoryContent({
           type="primary"
           onClick={save}
         >
-          {t('settings.addDirectory')}
+          {t(initialDeviceId ? 'settings.setDeviceDirectory' : 'settings.addDirectory')}
         </Button>
       </Flexbox>
     </Flexbox>
   );
 }
-export const openAddDirectoryModal = (projectId: string, environmentId?: string) =>
+export const openAddDirectoryModal = (
+  projectId: string,
+  environmentId?: string,
+  options: AddDirectoryOptions = {},
+) =>
   createModal({
-    title: t('settings.addDirectory', { ns: 'project' }),
-    content: <AddDirectoryContent environmentId={environmentId} projectId={projectId} />,
+    title: t(options.deviceId ? 'settings.setDeviceDirectory' : 'settings.addDirectory', {
+      ns: 'project',
+    }),
+    content: (
+      <AddDirectoryContent {...options} environmentId={environmentId} projectId={projectId} />
+    ),
     footer: null,
     width: 520,
   });

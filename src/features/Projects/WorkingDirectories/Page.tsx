@@ -18,7 +18,6 @@ import { useCanManageProject } from '../useCanManageProject';
 import { AdvancedSettings } from './AdvancedSettings';
 import { GeneralSettings } from './GeneralSettings';
 import { ProjectWorkingDirectories } from './index';
-import { WorkingDirectorySettings } from './WorkingDirectorySettings';
 
 interface SectionItem {
   key: string;
@@ -50,7 +49,7 @@ export function ProjectDirectoriesPage() {
       render: () => (
         <Flexbox gap={32}>
           <ProjectMemberSettings detail={detail} />
-          <MembersSettings projectId={detail.project.id} />
+          <MembersSettings project={detail.project} />
         </Flexbox>
       ),
     },
@@ -62,12 +61,9 @@ export function ProjectDirectoriesPage() {
     {
       key: 'environments',
       label: t('settings.environments'),
-      render: () => <ProjectWorkingDirectories projectId={detail.project.id} />,
-    },
-    {
-      key: 'directories',
-      label: t('settings.workLocations'),
-      render: () => <WorkingDirectorySettings projectId={detail.project.id} />,
+      render: () => (
+        <ProjectWorkingDirectories canManage={canManage} projectId={detail.project.id} />
+      ),
     },
     {
       key: 'sites',
@@ -85,7 +81,10 @@ export function ProjectDirectoriesPage() {
         ]
       : []),
   ];
-  const activeSection = sections.find((item) => item.key === section) ?? sections[0];
+  // Local folders were their own tab before they joined the environment; an old
+  // link to that tab opens the environment, where they now are.
+  const sectionKey = section === 'directories' ? 'environments' : section;
+  const activeSection = sections.find((item) => item.key === sectionKey) ?? sections[0];
 
   return (
     <Flexbox flex={1} padding={isMobile ? 16 : 32} style={{ overflow: 'auto' }}>
